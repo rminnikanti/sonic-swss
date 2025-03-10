@@ -1,3 +1,10 @@
+extern "C" {
+#include <saiobject.h>
+#include <saistatus.h>
+#include <saihash.h>
+#include <saiswitch.h>
+}
+
 #include "sai.h"
 #include "copporch.h"
 #include "portsorch.h"
@@ -89,7 +96,8 @@ static map<string, sai_hostif_trap_type_t> trap_id_map = {
     {"dest_nat_miss", SAI_HOSTIF_TRAP_TYPE_DNAT_MISS},
     {"ldp", SAI_HOSTIF_TRAP_TYPE_LDP},
     {"bfd_micro", SAI_HOSTIF_TRAP_TYPE_BFD_MICRO},
-    {"bfdv6_micro", SAI_HOSTIF_TRAP_TYPE_BFDV6_MICRO}
+    {"bfdv6_micro", SAI_HOSTIF_TRAP_TYPE_BFDV6_MICRO},
+    {"neighbor_miss", SAI_HOSTIF_TRAP_TYPE_NEIGHBOR_MISS}
 };
 
 
@@ -104,7 +112,13 @@ std::string get_trap_name_by_type(sai_hostif_trap_type_t trap_type)
         }
     }
 
-    return trap_name_to_id_map.at(trap_type);
+    auto it = trap_name_to_id_map.find(trap_type);
+    if (it == trap_name_to_id_map.end())
+    {
+        return "";
+    }
+
+    return it->second;
 }
 
 static map<string, sai_packet_action_t> packet_action_map = {
@@ -122,15 +136,23 @@ const string default_trap_group = "default";
 const vector<sai_hostif_trap_type_t> default_trap_ids = {
     SAI_HOSTIF_TRAP_TYPE_TTL_ERROR
 };
+
+const vector<sai_hostif_trap_type_t> require_capability_check_trap_ids = {
+    SAI_HOSTIF_TRAP_TYPE_NEIGHBOR_MISS
+};
+
 const uint HOSTIF_TRAP_COUNTER_POLLING_INTERVAL_MS = 10000;
 
 CoppOrch::CoppOrch(DBConnector* db, string tableName) :
     Orch(db, tableName),
     m_counter_db(std::shared_ptr<DBConnector>(new DBConnector("COUNTERS_DB", 0))),
     m_asic_db(std::shared_ptr<DBConnector>(new DBConnector("ASIC_DB", 0))),
+    m_state_db(std::shared_ptr<DBConnector>(new DBConnector("STATE_DB", 0))),
     m_counter_table(std::unique_ptr<Table>(new Table(m_counter_db.get(), COUNTERS_TRAP_NAME_MAP))),
     m_vidToRidTable(std::unique_ptr<Table>(new Table(m_asic_db.get(), "VIDTORID"))),
-    m_trap_counter_manager(HOSTIF_TRAP_COUNTER_FLEX_COUNTER_GROUP, StatsMode::READ, HOSTIF_TRAP_COUNTER_POLLING_INTERVAL_MS, false)
+    m_trap_counter_manager(HOSTIF_TRAP_COUNTER_FLEX_COUNTER_GROUP, StatsMode::READ, HOSTIF_TRAP_COUNTER_POLLING_INTERVAL_MS, false),
+    m_trapCapabilityTable(std::unique_ptr<Table>(new Table(m_state_db.get(), STATE_COPP_TRAP_CAPABILITY_TABLE_NAME))),
+    m_trapTable(std::unique_ptr<Table>(new Table(m_state_db.get(), STATE_COPP_TRAP_TABLE_NAME)))
 {
     SWSS_LOG_ENTER();
     auto intervT = timespec { .tv_sec = FLEX_COUNTER_UPD_INTERVAL , .tv_nsec = 0 };
@@ -138,10 +160,99 @@ CoppOrch::CoppOrch(DBConnector* db, string tableName) :
     auto executorT = new ExecutableTimer(m_FlexCounterUpdTimer, this, "FLEX_COUNTER_UPD_TIMER");
     Orch::addExecutor(executorT);
 
+    publishTrapIdsCapability();
+
+    /* Create hostIf table */
     initDefaultHostIntfTable();
+    /* Get default trap group of the switch */
     initDefaultTrapGroup();
+    /* Apply default trap group to default trap IDs */
     initDefaultTrapIds();
+
 };
+
+bool CoppOrch::isTrapIdUnsupported(sai_hostif_trap_type_t trap_id) const
+{
+    auto it = std::find(require_capability_check_trap_ids.begin(), require_capability_check_trap_ids.end(), trap_id);
+
+    return (it != require_capability_check_trap_ids.end() && supported_trap_ids.find(trap_id) == supported_trap_ids.end());
+}
+
+void CoppOrch::updateTrapOperStatus(const string& trapName, const string& operStatus)
+{
+    if (operStatus.empty())
+    {
+        // Remove the oper_status field from the table
+        m_trapTable->hdel(trapName, "oper_status");
+    }
+    else
+    {
+        // Update or add the oper_status field in the table
+        vector<FieldValueTuple> fieldValues;
+        fieldValues.emplace_back("oper_status", operStatus);
+        m_trapTable->set(trapName, fieldValues);
+    }
+}
+
+// Query SAI for trap IDs capability and publish to the COPP_TRAP_CAPABILITY_TABLE
+void CoppOrch::publishTrapIdsCapability()
+{
+    SWSS_LOG_ENTER();
+
+    sai_s32_list_t enumValuesCapabilities;
+
+    const auto* meta = sai_metadata_get_attr_metadata(SAI_OBJECT_TYPE_HOSTIF_TRAP, SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE);
+    if (!meta || !meta->isenum) 
+    {
+        SWSS_LOG_THROW("sai_metadata_get_attr_metadata for SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE Failed");
+        return;    
+    }
+
+    vector<int32_t> values_list(meta->enummetadata->valuescount);    
+    enumValuesCapabilities.count = static_cast<uint32_t>(values_list.size());
+    enumValuesCapabilities.list = values_list.data();
+
+
+    sai_status_t status = sai_query_attribute_enum_values_capability(gSwitchId,
+                                                                     SAI_OBJECT_TYPE_HOSTIF_TRAP,
+                                                                     SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE,
+                                                                     &enumValuesCapabilities);
+    if (status != SAI_STATUS_SUCCESS)
+    {
+        /* sai_query_attribute_enum_values_capability may not be supported by all SAI implementations.
+         * Log a warning and return. No STATE_DB entry is created in this case.
+         */
+        SWSS_LOG_WARN("Failed to query trap id enum values capability"
+                        " from SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE assuming only default trap IDs are supported");
+        return;
+    }
+
+    string trap_id_list_str;
+
+    for (uint32_t i = 0; i < enumValuesCapabilities.count; i++)
+    {
+
+        auto trap_str = get_trap_name_by_type(static_cast<sai_hostif_trap_type_t>(enumValuesCapabilities.list[i]));
+        if (trap_str.empty())
+        {
+            SWSS_LOG_NOTICE("Unknown trap id enum value: %d", enumValuesCapabilities.list[i]);
+            continue;
+        }
+
+        supported_trap_ids.insert(static_cast<sai_hostif_trap_type_t>(enumValuesCapabilities.list[i]));
+
+        if (!trap_id_list_str.empty())
+        {          
+            trap_id_list_str += ",";
+        }
+        trap_id_list_str += trap_str;
+    }
+
+    // After the loop, set the DB field with the collected trap IDs:
+    vector<FieldValueTuple> fvs;
+    fvs.push_back(FieldValueTuple("traps", trap_id_list_str));
+    m_trapCapabilityTable->set("trap_id_list", fvs);
+}
 
 void CoppOrch::initDefaultHostIntfTable()
 {
@@ -188,17 +299,13 @@ void CoppOrch::initDefaultTrapIds()
     attr.value.oid = m_trap_group_map[default_trap_group];
     trap_id_attrs.push_back(attr);
 
-    /*
-     * Use a default trap priority > 0 to avoid undesirable packet trapping
-     * behavior on some platforms that use 0 as default SAI-internal priority.
-     * Note: Mellanox and Marvell platforms don't support trap priority setting.
-     */
-
+    /* Mellanox platform doesn't support trap priority setting */
+    /* Marvell platform doesn't support trap priority. */
     char *platform = getenv("platform");
     if (!platform || (!strstr(platform, MLNX_PLATFORM_SUBSTRING) && (!strstr(platform, MRVL_PRST_PLATFORM_SUBSTRING))))
     {
         attr.id = SAI_HOSTIF_TRAP_ATTR_TRAP_PRIORITY;
-        attr.value.u32 = 1;
+        attr.value.u32 = 0;
         trap_id_attrs.push_back(attr);
     }
 
@@ -248,6 +355,14 @@ void CoppOrch::getTrapIdList(vector<string> &trap_id_name_list, vector<sai_hosti
             SWSS_LOG_NOTICE("Ignoring the trap_id: %s, as NAT is not supported", trap_id_str.c_str());
             continue;
         }
+
+        if (isTrapIdUnsupported(trap_id))
+        {
+            /* If the trap_id is in require_capability_check_trap_ids and not supported, ignore it */
+            SWSS_LOG_ERROR("Ignoring unsupported trap_id: %s", trap_id_str.c_str());
+            continue;
+        }
+
         trap_id_list.push_back(trap_id);
     }
 }
@@ -358,6 +473,8 @@ bool CoppOrch::applyAttributesToTrapIds(sai_object_id_t trap_group_id,
                 return parseHandleSaiStatusFailure(handle_status);
             }
         }
+
+        updateTrapOperStatus(get_trap_name_by_type(trap_id), "installed");
         m_syncdTrapIds[trap_id].trap_group_obj = trap_group_id;
         m_syncdTrapIds[trap_id].trap_obj = hostif_trap_id;
         m_syncdTrapIds[trap_id].trap_type = trap_id;
@@ -803,6 +920,7 @@ void CoppOrch::getTrapAddandRemoveList(string trap_group_name,
 {
 
     vector<sai_hostif_trap_type_t> tmp_trap_ids = trap_ids;
+   
     if(m_trap_group_map.find(trap_group_name) == m_trap_group_map.end())
     {
         add_trap_ids = trap_ids;
@@ -867,7 +985,7 @@ bool CoppOrch::trapGroupProcessTrapIdChange (string trap_group_name,
         {
             if (m_syncdTrapIds.find(i)!= m_syncdTrapIds.end())
             {
-                if (!removeTrap(m_syncdTrapIds[i].trap_obj))
+                if (!removeTrap(m_syncdTrapIds[i].trap_obj, i))
                 {
                     return false;
                 }
@@ -912,7 +1030,7 @@ bool CoppOrch::trapGroupProcessTrapIdChange (string trap_group_name,
                  */
                 if (m_syncdTrapIds[i].trap_group_obj ==  m_trap_group_map[trap_group_name])
                 {
-                    if (!removeTrap(m_syncdTrapIds[i].trap_obj))
+                    if (!removeTrap(m_syncdTrapIds[i].trap_obj, i))
                     {
                         return false;
                     }
@@ -956,7 +1074,7 @@ bool CoppOrch::processTrapGroupDel (string trap_group_name)
         if (it.second.trap_group_obj == m_trap_group_map[trap_group_name])
         {
             trap_ids_to_reset.push_back(it.first);
-            if (!removeTrap(it.second.trap_obj))
+            if (!removeTrap(it.second.trap_obj, it.first))
             {
                 return false;
             }
@@ -1227,7 +1345,7 @@ void CoppOrch::initTrapRatePlugin()
     m_trap_rate_plugin_loaded = true;
 }
 
-bool CoppOrch::removeTrap(sai_object_id_t hostif_trap_id)
+bool CoppOrch::removeTrap(sai_object_id_t hostif_trap_id, sai_hostif_trap_type_t trap_type)
 {
     unbindTrapCounter(hostif_trap_id);
 
@@ -1242,6 +1360,8 @@ bool CoppOrch::removeTrap(sai_object_id_t hostif_trap_id)
             return parseHandleSaiStatusFailure(handle_status);
         }
     }
+    
+    updateTrapOperStatus(get_trap_name_by_type(trap_type), "");
 
     return true;
 }

@@ -71,7 +71,8 @@ traps_to_trap_type = {
         "dest_nat_miss": "SAI_HOSTIF_TRAP_TYPE_DNAT_MISS",
         "ldp": "SAI_HOSTIF_TRAP_TYPE_LDP",
         "bfd_micro": "SAI_HOSTIF_TRAP_TYPE_BFD_MICRO",
-        "bfdv6_micro": "SAI_HOSTIF_TRAP_TYPE_BFDV6_MICRO"
+        "bfdv6_micro": "SAI_HOSTIF_TRAP_TYPE_BFDV6_MICRO",
+        "neighbor_miss": "SAI_HOSTIF_TRAP_TYPE_NEIGHBOR_MISS"
         }
 
 copp_group_default = {
@@ -162,7 +163,8 @@ copp_trap = {
         "ip2me": ["ip2me", copp_group_queue1_group1, "always_enabled"],
         "nat": ["src_nat_miss;dest_nat_miss", copp_group_queue1_group2],
         "sflow": ["sample_packet", copp_group_queue2_group1],
-        "ttl": ["ttl_error", copp_group_default]
+        "ttl": ["ttl_error", copp_group_default],
+        "neighbor_miss": ["neighbor_miss", copp_group_queue1_group1, "always_enabled"]
 }
 
 disabled_traps = ["sample_packet"]
@@ -232,8 +234,6 @@ class TestCopp(object):
         queue = ""
         trap_action = ""
         trap_priority = ""
-        default_trap_queue = "0"
-        default_trap_prio = "1"
 
         for fv in trap_fvs:
             if fv[0] == "SAI_HOSTIF_TRAP_ATTR_PACKET_ACTION":
@@ -264,11 +264,6 @@ class TestCopp(object):
                 assert trap_group_oid != "oid:0x0"
                 if keys == "queue":
                     assert queue == trap_group[keys]
-                    # default trap in copp config doesn't specify a trap priority
-                    # this is instead set internally in swss
-                    # confirm that default trap uses a priority 1
-                    if queue == default_trap_queue:
-                        assert trap_priority == default_trap_prio
                 else:
                     assert 0
 
