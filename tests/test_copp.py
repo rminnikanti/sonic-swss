@@ -129,6 +129,17 @@ copp_group_queue1_group2 = {
         "red_action":"drop"
 }
 
+copp_group_queue1_group3 = {
+        "trap_action":"trap",
+        "trap_priority":"1",
+        "queue": "1",
+        "meter_type":"packets",
+        "mode":"sr_tcm",
+        "cir":"200",
+        "cbs":"200",
+        "red_action":"drop"
+}
+
 copp_group_queue2_group1 = {
 	"cbs": "1000",
 	"cir": "1000",
@@ -164,7 +175,7 @@ copp_trap = {
         "nat": ["src_nat_miss;dest_nat_miss", copp_group_queue1_group2],
         "sflow": ["sample_packet", copp_group_queue2_group1],
         "ttl": ["ttl_error", copp_group_default],
-        "neighbor_miss": ["neighbor_miss", copp_group_queue1_group1, "always_enabled"]
+        "neighbor_miss": ["neighbor_miss", copp_group_queue1_group3, "always_enabled"]
 }
 
 disabled_traps = ["sample_packet"]
@@ -196,6 +207,7 @@ class TestCopp(object):
     def setup_copp(self, dvs):
         self.adb = swsscommon.DBConnector(1, dvs.redis_sock, 0)
         self.cdb = swsscommon.DBConnector(4, dvs.redis_sock, 0)
+        self.sdb = swsscommon.DBConnector(6, dvs.redis_sock, 0)
         self.trap_atbl = swsscommon.Table(self.adb, "ASIC_STATE:SAI_OBJECT_TYPE_HOSTIF_TRAP")
         self.trap_group_atbl = swsscommon.Table(self.adb, "ASIC_STATE:SAI_OBJECT_TYPE_HOSTIF_TRAP_GROUP")
         self.policer_atbl = swsscommon.Table(self.adb, "ASIC_STATE:SAI_OBJECT_TYPE_POLICER")
@@ -204,10 +216,20 @@ class TestCopp(object):
         self.trap_ctbl = swsscommon.Table(self.cdb, "COPP_TRAP")
         self.trap_group_ctbl = swsscommon.Table(self.cdb, "COPP_GROUP")
         self.feature_tbl = swsscommon.Table(self.cdb, "FEATURE")
+        self.state_stbl = swsscommon.Table(self.sdb, "COPP_TRAP_TABLE")
+        self.capability_stbl = swsscommon.Table(self.sdb, "COPP_TRAP_CAPABILITY_TABLE")
         fvs = swsscommon.FieldValuePairs([("state", "disabled")])
         self.feature_tbl.set("sflow", fvs)
         time.sleep(2)
 
+    def validate_operational_status(self, trap_id, trap_status):
+        (status, fvs) = self.state_stbl.get(trap_id)
+        if trap_status == True:
+            assert status == True
+        if status:
+            for fv in fvs:
+                if fv[0] == "oper_status":
+                    assert trap_status == True and fv[1] == "installed"
 
     def validate_policer(self, policer_oid, field, value):
         (status, fvs) = self.policer_atbl.get(policer_oid)
@@ -332,6 +354,15 @@ class TestCopp(object):
                 if trap_id not in disabled_traps:
                     assert trap_found == True
 
+        (status, fvs) = self.capability_stbl.get("traps")
+        assert status == True
+        trap_list = []
+        for fv in fvs:
+            if fv[0] == "trap_id_list":
+                trap_list = fv[1].split(",")
+                break
+
+        assert len(trap_list) != 0
 
     def test_restricted_trap_sflow(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -472,6 +503,7 @@ class TestCopp(object):
                 assert trap_found == True
             elif trap_id == "bgpv6":
                 assert trap_found == False
+            self.validate_operational_status(trap_id, trap_found)
 
         traps = "bgp,bgpv6"
         fvs = swsscommon.FieldValuePairs([("trap_ids", traps)])
@@ -496,6 +528,8 @@ class TestCopp(object):
                     self.validate_trap_group(key,trap_group)
                     break
             assert trap_found == True
+            self.validate_operational_status(trap_id, trap_found)
+
 
     def test_trap_action_set(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -560,6 +594,7 @@ class TestCopp(object):
                     break
             if trap_id not in disabled_traps:
                 assert trap_found == True
+                self.validate_operational_status(trap_id, trap_found)
 
     def test_new_trap_del(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -597,6 +632,7 @@ class TestCopp(object):
                     break
             if trap_id not in disabled_traps:
                 assert trap_found == False
+                self.validate_operational_status(trap_id, trap_found)
 
     def test_new_trap_group_add(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -636,6 +672,7 @@ class TestCopp(object):
                     break
             if trap_id not in disabled_traps:
                 assert trap_found == True
+                self.validate_operational_status(trap_id, trap_found)
 
     def test_new_trap_group_del(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -677,6 +714,7 @@ class TestCopp(object):
                     break
             if trap_id not in disabled_traps:
                 assert trap_found != True
+                self.validate_operational_status(trap_id, trap_found)
 
     def test_override_trap_grp_cfg_del (self, dvs, testlog):
         self.setup_copp(dvs)
@@ -746,6 +784,7 @@ class TestCopp(object):
                     assert trap_found == True
                 elif trap_id == "ssh":
                     assert trap_found == False
+                self.validate_operational_status(trap_id, trap_found)
 
     def test_empty_trap_cfg(self, dvs, testlog):
         self.setup_copp(dvs)
@@ -771,6 +810,7 @@ class TestCopp(object):
                 self.validate_trap_group(key,trap_group)
                 break
         assert trap_found == False
+        self.validate_operational_status(trap_id, trap_found)
 
         self.trap_ctbl._del("ip2me")
         time.sleep(2)
@@ -790,6 +830,7 @@ class TestCopp(object):
                 self.validate_trap_group(key,trap_group)
                 break
         assert trap_found == True
+        self.validate_operational_status(trap_id, trap_found)
 
 
     def test_disabled_feature_always_enabled_trap(self, dvs, testlog):
