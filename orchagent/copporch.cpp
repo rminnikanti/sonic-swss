@@ -100,6 +100,51 @@ static map<string, sai_hostif_trap_type_t> trap_id_map = {
     {"neighbor_miss", SAI_HOSTIF_TRAP_TYPE_NEIGHBOR_MISS}
 };
 
+const vector<sai_hostif_trap_type_t> default_supported_trap_ids = {
+    SAI_HOSTIF_TRAP_TYPE_STP,
+    SAI_HOSTIF_TRAP_TYPE_LACP,
+    SAI_HOSTIF_TRAP_TYPE_EAPOL,
+    SAI_HOSTIF_TRAP_TYPE_LLDP,
+    SAI_HOSTIF_TRAP_TYPE_PVRST,
+    SAI_HOSTIF_TRAP_TYPE_IGMP_TYPE_QUERY,
+    SAI_HOSTIF_TRAP_TYPE_IGMP_TYPE_LEAVE,
+    SAI_HOSTIF_TRAP_TYPE_IGMP_TYPE_V1_REPORT,
+    SAI_HOSTIF_TRAP_TYPE_IGMP_TYPE_V2_REPORT,
+    SAI_HOSTIF_TRAP_TYPE_IGMP_TYPE_V3_REPORT,
+    SAI_HOSTIF_TRAP_TYPE_SAMPLEPACKET,
+    SAI_HOSTIF_TRAP_TYPE_SWITCH_CUSTOM_RANGE_BASE,
+    SAI_HOSTIF_TRAP_TYPE_ARP_REQUEST,
+    SAI_HOSTIF_TRAP_TYPE_ARP_RESPONSE,
+    SAI_HOSTIF_TRAP_TYPE_DHCP,
+    SAI_HOSTIF_TRAP_TYPE_OSPF,
+    SAI_HOSTIF_TRAP_TYPE_PIM,
+    SAI_HOSTIF_TRAP_TYPE_VRRP,
+    SAI_HOSTIF_TRAP_TYPE_BGP,
+    SAI_HOSTIF_TRAP_TYPE_DHCPV6,
+    SAI_HOSTIF_TRAP_TYPE_OSPFV6,
+    SAI_HOSTIF_TRAP_TYPE_ISIS,
+    SAI_HOSTIF_TRAP_TYPE_VRRPV6,
+    SAI_HOSTIF_TRAP_TYPE_BGPV6,
+    SAI_HOSTIF_TRAP_TYPE_IPV6_NEIGHBOR_DISCOVERY,
+    SAI_HOSTIF_TRAP_TYPE_IPV6_MLD_V1_V2,
+    SAI_HOSTIF_TRAP_TYPE_IPV6_MLD_V1_REPORT,
+    SAI_HOSTIF_TRAP_TYPE_IPV6_MLD_V1_DONE,
+    SAI_HOSTIF_TRAP_TYPE_MLD_V2_REPORT,
+    SAI_HOSTIF_TRAP_TYPE_IP2ME,
+    SAI_HOSTIF_TRAP_TYPE_SSH,
+    SAI_HOSTIF_TRAP_TYPE_SNMP,
+    SAI_HOSTIF_TRAP_TYPE_ROUTER_CUSTOM_RANGE_BASE,
+    SAI_HOSTIF_TRAP_TYPE_L3_MTU_ERROR,
+    SAI_HOSTIF_TRAP_TYPE_TTL_ERROR,
+    SAI_HOSTIF_TRAP_TYPE_UDLD,
+    SAI_HOSTIF_TRAP_TYPE_BFD,
+    SAI_HOSTIF_TRAP_TYPE_BFDV6,
+    SAI_HOSTIF_TRAP_TYPE_SNAT_MISS,
+    SAI_HOSTIF_TRAP_TYPE_DNAT_MISS,
+    SAI_HOSTIF_TRAP_TYPE_LDP,
+    SAI_HOSTIF_TRAP_TYPE_BFD_MICRO,
+    SAI_HOSTIF_TRAP_TYPE_BFDV6_MICRO
+};
 
 std::string get_trap_name_by_type(sai_hostif_trap_type_t trap_type)
 {
@@ -173,9 +218,7 @@ CoppOrch::CoppOrch(DBConnector* db, string tableName) :
 
 bool CoppOrch::isTrapIdUnsupported(sai_hostif_trap_type_t trap_id) const
 {
-    auto it = std::find(require_capability_check_trap_ids.begin(), require_capability_check_trap_ids.end(), trap_id);
-
-    return (it != require_capability_check_trap_ids.end() && supported_trap_ids.find(trap_id) == supported_trap_ids.end());
+    return supported_trap_ids.find(trap_id) == supported_trap_ids.end();
 }
 
 void CoppOrch::updateTrapOperStatus(const string& trapName, const string& operStatus)
@@ -219,12 +262,12 @@ void CoppOrch::publishTrapIdsCapability()
                                                                      &enumValuesCapabilities);
     if (status != SAI_STATUS_SUCCESS)
     {
-        /* sai_query_attribute_enum_values_capability may not be supported by all SAI implementations.
-         * Log a warning and return. No STATE_DB entry is created in this case.
-         */
         SWSS_LOG_WARN("Failed to query trap id enum values capability"
-                        " from SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE assuming only default trap IDs are supported");
-        return;
+                        " from SAI_HOSTIF_TRAP_ATTR_TRAP_TYPE assuming set of pre-defined trap IDs as supported");
+        // Populate enumValuesCapabilities with default_supported_trap_ids
+        enumValuesCapabilities.count = static_cast<uint32_t>(default_supported_trap_ids.size());
+        values_list.assign(default_supported_trap_ids.begin(), default_supported_trap_ids.end());
+        enumValuesCapabilities.list = values_list.data();
     }
 
     string trap_id_list_str;
@@ -358,7 +401,7 @@ void CoppOrch::getTrapIdList(vector<string> &trap_id_name_list, vector<sai_hosti
 
         if (isTrapIdUnsupported(trap_id))
         {
-            /* If the trap_id is in require_capability_check_trap_ids and not supported, ignore it */
+            /* If the trap_id is not in supported_trap_ids, ignore it */
             SWSS_LOG_ERROR("Ignoring unsupported trap_id: %s", trap_id_str.c_str());
             continue;
         }
